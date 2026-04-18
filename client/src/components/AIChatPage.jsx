@@ -51,26 +51,27 @@ function useVoice() {
 
 // ─── Speech-input hook ────────────────────────────────────────────────────────
 function useSpeechInput({ onInterim, onFinal }) {
-  const recognitionRef  = useRef(null);
-  const listeningRef    = useRef(false);
-  const lastInterimRef  = useRef("");
-  const onInterimRef    = useRef(onInterim);
-  const onFinalRef      = useRef(onFinal);
+  const recognitionRef = useRef(null);
+  const listeningRef   = useRef(false);   // user intent: true = wants to listen
+  const interimRef     = useRef("");
+  const onInterimRef   = useRef(onInterim);
+  const onFinalRef     = useRef(onFinal);
   const [listening, setListening] = useState(false);
   const supported = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
 
   onInterimRef.current = onInterim;
   onFinalRef.current   = onFinal;
 
-  const start = useCallback(() => {
-    if (!supported || listeningRef.current) return;
-
+  // Creates and starts one recognition session.
+  // Calls itself again on silence timeout (listeningRef still true) so the
+  // green UI stays solid — only the browser's internal session cycles, not ours.
+  const startSession = useCallback(() => {
+    if (!supported) return;
     const SR  = window.SpeechRecognition || window.webkitSpeechRecognition;
     const rec = new SR();
     rec.continuous     = true;
     rec.interimResults = true;
     rec.lang           = "en-US";
-    lastInterimRef.current = "";
 
     rec.onresult = (e) => {
       let interim = "", final = "";
@@ -80,24 +81,37 @@ function useSpeechInput({ onInterim, onFinal }) {
         else interim += t;
       }
       if (final) {
-        lastInterimRef.current = "";
-        listeningRef.current   = false;
+        interimRef.current   = "";
+        listeningRef.current = false;   // done — user spoke
         setListening(false);
-        rec.abort();
+        try { rec.abort(); } catch (_) {}
         onFinalRef.current(final);
       } else if (interim) {
-        lastInterimRef.current = interim;
+        interimRef.current = interim;
         onInterimRef.current(interim);
       }
     };
 
     rec.onend = () => {
-      // If the session ended mid-speech (browser silence cut-off), send what we have
-      const leftover = lastInterimRef.current.trim();
-      lastInterimRef.current = "";
-      listeningRef.current   = false;
-      setListening(false);
-      if (leftover) onFinalRef.current(leftover);
+      if (!listeningRef.current) {
+        // Either user stopped manually or a final result was already delivered
+        setListening(false);
+        return;
+      }
+
+      const leftover = interimRef.current.trim();
+      if (leftover) {
+        // Had partial speech when session cut off — send it
+        interimRef.current   = "";
+        listeningRef.current = false;
+        setListening(false);
+        onFinalRef.current(leftover);
+      } else {
+        // Pure silence timeout — restart the session silently, keep UI green
+        setTimeout(() => {
+          if (listeningRef.current) startSession();
+        }, 80);
+      }
     };
 
     rec.onerror = (e) => {
@@ -105,18 +119,24 @@ function useSpeechInput({ onInterim, onFinal }) {
         listeningRef.current = false;
         setListening(false);
       }
-      // no-speech / network: non-fatal, onend will clean up
+      // no-speech: onend fires next and will restart cleanly
     };
 
-    listeningRef.current = true;
-    setListening(true);
     recognitionRef.current = rec;
     try { rec.start(); } catch (_) {}
   }, [supported]);
 
+  const start = useCallback(() => {
+    if (!supported || listeningRef.current) return;
+    interimRef.current   = "";
+    listeningRef.current = true;
+    setListening(true);
+    startSession();
+  }, [supported, startSession]);
+
   const stop = useCallback(() => {
-    lastInterimRef.current = "";
-    listeningRef.current   = false;
+    interimRef.current   = "";
+    listeningRef.current = false;
     setListening(false);
     try { recognitionRef.current?.abort(); } catch (_) {}
   }, []);
