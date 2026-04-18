@@ -60,21 +60,29 @@ function useSpeechInput({ onInterim, onFinal }) {
     if (!supported) return;
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     const rec = new SR();
-    rec.continuous = false;
+    rec.continuous = true;       // stay alive; we stop manually after final result
     rec.interimResults = true;
     rec.lang = "en-US";
 
     rec.onstart = () => { listeningRef.current = true; setListening(true); };
+
     rec.onresult = (e) => {
-      const transcript = Array.from(e.results).map((r) => r[0].transcript).join("");
-      const isFinal = e.results[e.results.length - 1].isFinal;
-      if (isFinal) {
-        onFinal(transcript);
+      let interim = "";
+      let final = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const t = e.results[i][0].transcript;
+        if (e.results[i].isFinal) final += t;
+        else interim += t;
+      }
+      if (final) {
+        onFinal(final);
+        rec.stop();              // stop after we get the final transcript
       } else {
-        onInterim(transcript);
+        onInterim(interim);
       }
     };
-    rec.onend  = () => { listeningRef.current = false; setListening(false); };
+
+    rec.onend   = () => { listeningRef.current = false; setListening(false); };
     rec.onerror = () => { listeningRef.current = false; setListening(false); };
 
     recognitionRef.current = rec;
@@ -295,11 +303,13 @@ export default function AIChatPage({ onClose }) {
 
   const { speak, stop: stopSpeaking, speaking, speakingRef } = useVoice();
 
+  // Use a ref so handleFinal always calls the latest sendMessage (avoids stale closure)
+  const sendRef = useRef(null);
+
   const handleInterim = useCallback((t) => setInput(t), []);
   const handleFinal   = useCallback((t) => {
     setInput("");
-    sendMessage(t);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    sendRef.current?.(t);
   }, []);
 
   const { toggle: toggleMic, stop: stopMic, listening, listeningRef, supported: micSupported } =
@@ -324,6 +334,7 @@ export default function AIChatPage({ onClose }) {
   }, [messages, loading]);
 
   async function sendMessage(text) {
+    sendRef.current = sendMessage;
     const msg = (text ?? input).trim();
     if (!msg || loading) return;
     setInput("");
