@@ -50,19 +50,34 @@ function useVoice() {
 }
 
 // ─── Speech-input hook ────────────────────────────────────────────────────────
+// Strategy: acquire the mic stream once via getUserMedia and keep it alive.
+// We create a new SpeechRecognition per utterance but the mic never physically
+// turns off between utterances, so the browser indicator stops flashing.
 function useSpeechInput({ onInterim, onFinal }) {
   const recognitionRef = useRef(null);
+  const streamRef      = useRef(null);   // persistent MediaStream
   const listeningRef   = useRef(false);
   const onInterimRef   = useRef(onInterim);
   const onFinalRef     = useRef(onFinal);
   const [listening, setListening] = useState(false);
   const supported = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
 
-  // Keep callback refs fresh so restarts don't capture stale closures
   onInterimRef.current = onInterim;
   onFinalRef.current   = onFinal;
 
-  const spawnRecognition = useCallback(() => {
+  // Keep the mic stream warm so the browser mic indicator stays solid green
+  const acquireStream = useCallback(async () => {
+    if (streamRef.current) return streamRef.current;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      return stream;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const startRecognition = useCallback(() => {
     if (!supported) return;
     const SR  = window.SpeechRecognition || window.webkitSpeechRecognition;
     const rec = new SR();
@@ -78,7 +93,6 @@ function useSpeechInput({ onInterim, onFinal }) {
         else interim += t;
       }
       if (final) {
-        // Got a complete sentence — deliver it and stop
         listeningRef.current = false;
         setListening(false);
         rec.stop();
@@ -88,45 +102,56 @@ function useSpeechInput({ onInterim, onFinal }) {
       }
     };
 
+    // Browser killed the session (silence/timeout) — restart silently.
+    // Because the getUserMedia stream is still open, the browser mic indicator
+    // stays lit and does NOT flash between sessions.
     rec.onend = () => {
-      // If the browser killed recognition but user hasn't stopped, restart it
       if (listeningRef.current) {
         setTimeout(() => {
-          if (listeningRef.current) spawnRecognition();
-        }, 120);
+          if (listeningRef.current) startRecognition();
+        }, 80);
       } else {
         setListening(false);
       }
     };
 
     rec.onerror = (e) => {
-      // no-speech / audio-capture are non-fatal — let onend handle the restart
       if (!listeningRef.current || e.error === "aborted") {
         listeningRef.current = false;
         setListening(false);
       }
+      // no-speech / network errors: onend will restart
     };
 
     recognitionRef.current = rec;
     rec.start();
   }, [supported]);
 
-  const start = useCallback(() => {
+  const start = useCallback(async () => {
     if (!supported || listeningRef.current) return;
+    await acquireStream();          // open mic once — keeps indicator solid
     listeningRef.current = true;
     setListening(true);
-    spawnRecognition();
-  }, [supported, spawnRecognition]);
+    startRecognition();
+  }, [supported, acquireStream, startRecognition]);
 
   const stop = useCallback(() => {
     listeningRef.current = false;
     setListening(false);
     recognitionRef.current?.stop();
+    // Release the stream so the mic indicator clears when user stops
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
   }, []);
 
   const toggle = useCallback(() => {
     if (listeningRef.current) stop(); else start();
   }, [start, stop]);
+
+  // Clean up stream on unmount
+  useEffect(() => () => {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+  }, []);
 
   return { toggle, stop, listening, listeningRef, supported };
 }
