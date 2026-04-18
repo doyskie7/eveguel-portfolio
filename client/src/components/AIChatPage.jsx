@@ -52,47 +52,76 @@ function useVoice() {
 // ─── Speech-input hook ────────────────────────────────────────────────────────
 function useSpeechInput({ onInterim, onFinal }) {
   const recognitionRef = useRef(null);
-  const listeningRef = useRef(false);
+  const listeningRef   = useRef(false);
+  const onInterimRef   = useRef(onInterim);
+  const onFinalRef     = useRef(onFinal);
   const [listening, setListening] = useState(false);
   const supported = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
 
-  const start = useCallback(() => {
-    if (!supported) return;
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    const rec = new SR();
-    rec.continuous = true;       // stay alive; we stop manually after final result
-    rec.interimResults = true;
-    rec.lang = "en-US";
+  // Keep callback refs fresh so restarts don't capture stale closures
+  onInterimRef.current = onInterim;
+  onFinalRef.current   = onFinal;
 
-    rec.onstart = () => { listeningRef.current = true; setListening(true); };
+  const spawnRecognition = useCallback(() => {
+    if (!supported) return;
+    const SR  = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const rec = new SR();
+    rec.continuous     = true;
+    rec.interimResults = true;
+    rec.lang           = "en-US";
 
     rec.onresult = (e) => {
-      let interim = "";
-      let final = "";
+      let interim = "", final = "";
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const t = e.results[i][0].transcript;
         if (e.results[i].isFinal) final += t;
         else interim += t;
       }
       if (final) {
-        onFinal(final);
-        rec.stop();              // stop after we get the final transcript
-      } else {
-        onInterim(interim);
+        // Got a complete sentence — deliver it and stop
+        listeningRef.current = false;
+        setListening(false);
+        rec.stop();
+        onFinalRef.current(final);
+      } else if (interim) {
+        onInterimRef.current(interim);
       }
     };
 
-    rec.onend   = () => { listeningRef.current = false; setListening(false); };
-    rec.onerror = () => { listeningRef.current = false; setListening(false); };
+    rec.onend = () => {
+      // If the browser killed recognition but user hasn't stopped, restart it
+      if (listeningRef.current) {
+        setTimeout(() => {
+          if (listeningRef.current) spawnRecognition();
+        }, 120);
+      } else {
+        setListening(false);
+      }
+    };
+
+    rec.onerror = (e) => {
+      // no-speech / audio-capture are non-fatal — let onend handle the restart
+      if (!listeningRef.current || e.error === "aborted") {
+        listeningRef.current = false;
+        setListening(false);
+      }
+    };
 
     recognitionRef.current = rec;
     rec.start();
-  }, [supported, onInterim, onFinal]);
+  }, [supported]);
+
+  const start = useCallback(() => {
+    if (!supported || listeningRef.current) return;
+    listeningRef.current = true;
+    setListening(true);
+    spawnRecognition();
+  }, [supported, spawnRecognition]);
 
   const stop = useCallback(() => {
-    recognitionRef.current?.stop();
     listeningRef.current = false;
     setListening(false);
+    recognitionRef.current?.stop();
   }, []);
 
   const toggle = useCallback(() => {
