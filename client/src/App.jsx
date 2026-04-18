@@ -1,11 +1,15 @@
+import { useState } from "react";
 import Background3D from "./components/Background3D";
 import Hero from "./components/Hero";
 import Skills from "./components/Skills";
 import Experience from "./components/Experience";
 import Contact from "./components/Contact";
-import ChatAgent from "./components/ChatAgent";
+import RobotButton from "./components/RobotButton";
+import AIChatPage from "./components/AIChatPage";
 
 export default function App() {
+  const [chatOpen, setChatOpen] = useState(false);
+
   return (
     <>
       <Background3D />
@@ -15,7 +19,8 @@ export default function App() {
         <Experience />
         <Contact />
       </div>
-      <ChatAgent />
+      {!chatOpen && <RobotButton onClick={() => setChatOpen(true)} />}
+      {chatOpen && <AIChatPage onClose={() => setChatOpen(false)} />}
     </>
   );
 }
