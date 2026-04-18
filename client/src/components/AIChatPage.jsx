@@ -52,7 +52,8 @@ function useVoice() {
 // ─── Speech-input hook ────────────────────────────────────────────────────────
 function useSpeechInput({ onInterim, onFinal }) {
   const recognitionRef = useRef(null);
-  const listeningRef   = useRef(false);   // user intent: true = wants to listen
+  const streamRef      = useRef(null);  // kept open to hold permission + mic indicator
+  const listeningRef   = useRef(false);
   const interimRef     = useRef("");
   const onInterimRef   = useRef(onInterim);
   const onFinalRef     = useRef(onFinal);
@@ -62,9 +63,11 @@ function useSpeechInput({ onInterim, onFinal }) {
   onInterimRef.current = onInterim;
   onFinalRef.current   = onFinal;
 
-  // Creates and starts one recognition session.
-  // Calls itself again on silence timeout (listeningRef still true) so the
-  // green UI stays solid — only the browser's internal session cycles, not ours.
+  const releaseStream = useCallback(() => {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+  }, []);
+
   const startSession = useCallback(() => {
     if (!supported) return;
     const SR  = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -82,8 +85,9 @@ function useSpeechInput({ onInterim, onFinal }) {
       }
       if (final) {
         interimRef.current   = "";
-        listeningRef.current = false;   // done — user spoke
+        listeningRef.current = false;
         setListening(false);
+        releaseStream();
         try { rec.abort(); } catch (_) {}
         onFinalRef.current(final);
       } else if (interim) {
@@ -94,42 +98,52 @@ function useSpeechInput({ onInterim, onFinal }) {
 
     rec.onend = () => {
       if (!listeningRef.current) {
-        // Either user stopped manually or a final result was already delivered
         setListening(false);
         return;
       }
-
+      // Send leftover partial speech if any
       const leftover = interimRef.current.trim();
       if (leftover) {
-        // Had partial speech when session cut off — send it
         interimRef.current   = "";
         listeningRef.current = false;
         setListening(false);
+        releaseStream();
         onFinalRef.current(leftover);
-      } else {
-        // Pure silence timeout — restart the session silently, keep UI green
-        setTimeout(() => {
-          if (listeningRef.current) startSession();
-        }, 80);
+        return;
       }
+      // Pure silence — restart silently. getUserMedia stream stays open so
+      // the browser grants permission instantly and mic indicator stays solid.
+      setTimeout(() => { if (listeningRef.current) startSession(); }, 80);
     };
 
     rec.onerror = (e) => {
       if (e.error === "not-allowed" || e.error === "service-not-allowed") {
         listeningRef.current = false;
         setListening(false);
+        releaseStream();
       }
-      // no-speech: onend fires next and will restart cleanly
+      // no-speech / network: onend fires next and handles restart
     };
 
     recognitionRef.current = rec;
     try { rec.start(); } catch (_) {}
-  }, [supported]);
+  }, [supported, releaseStream]);
 
-  const start = useCallback(() => {
+  const start = useCallback(async () => {
     if (!supported || listeningRef.current) return;
-    interimRef.current   = "";
-    listeningRef.current = true;
+    listeningRef.current = true; // set before await to block double-taps
+
+    // Open stream once — this pre-authorises mic so restarts never prompt again
+    try {
+      if (!streamRef.current) {
+        streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+      }
+    } catch {
+      listeningRef.current = false;
+      return;
+    }
+
+    interimRef.current = "";
     setListening(true);
     startSession();
   }, [supported, startSession]);
@@ -139,11 +153,14 @@ function useSpeechInput({ onInterim, onFinal }) {
     listeningRef.current = false;
     setListening(false);
     try { recognitionRef.current?.abort(); } catch (_) {}
-  }, []);
+    releaseStream();
+  }, [releaseStream]);
 
   const toggle = useCallback(() => {
     if (listeningRef.current) stop(); else start();
   }, [start, stop]);
+
+  useEffect(() => () => releaseStream(), [releaseStream]);
 
   return { toggle, stop, listening, listeningRef, supported };
 }
