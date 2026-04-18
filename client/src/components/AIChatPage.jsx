@@ -51,23 +51,26 @@ function useVoice() {
 
 // ─── Speech-input hook ────────────────────────────────────────────────────────
 function useSpeechInput({ onInterim, onFinal }) {
-  const recognitionRef = useRef(null);
-  const listeningRef   = useRef(false);
-  const onInterimRef   = useRef(onInterim);
-  const onFinalRef     = useRef(onFinal);
+  const recognitionRef  = useRef(null);
+  const listeningRef    = useRef(false);
+  const lastInterimRef  = useRef("");
+  const onInterimRef    = useRef(onInterim);
+  const onFinalRef      = useRef(onFinal);
   const [listening, setListening] = useState(false);
   const supported = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
 
   onInterimRef.current = onInterim;
   onFinalRef.current   = onFinal;
 
-  const startRecognition = useCallback(() => {
-    if (!supported) return;
+  const start = useCallback(() => {
+    if (!supported || listeningRef.current) return;
+
     const SR  = window.SpeechRecognition || window.webkitSpeechRecognition;
     const rec = new SR();
     rec.continuous     = true;
     rec.interimResults = true;
     rec.lang           = "en-US";
+    lastInterimRef.current = "";
 
     rec.onresult = (e) => {
       let interim = "", final = "";
@@ -77,22 +80,24 @@ function useSpeechInput({ onInterim, onFinal }) {
         else interim += t;
       }
       if (final) {
-        listeningRef.current = false;
+        lastInterimRef.current = "";
+        listeningRef.current   = false;
         setListening(false);
         rec.abort();
         onFinalRef.current(final);
       } else if (interim) {
+        lastInterimRef.current = interim;
         onInterimRef.current(interim);
       }
     };
 
     rec.onend = () => {
-      // Browser timed out due to silence — restart without toggling UI state
-      if (listeningRef.current) {
-        setTimeout(() => { if (listeningRef.current) startRecognition(); }, 100);
-      } else {
-        setListening(false);
-      }
+      // If the session ended mid-speech (browser silence cut-off), send what we have
+      const leftover = lastInterimRef.current.trim();
+      lastInterimRef.current = "";
+      listeningRef.current   = false;
+      setListening(false);
+      if (leftover) onFinalRef.current(leftover);
     };
 
     rec.onerror = (e) => {
@@ -100,22 +105,18 @@ function useSpeechInput({ onInterim, onFinal }) {
         listeningRef.current = false;
         setListening(false);
       }
-      // no-speech / audio-capture / network: non-fatal, onend handles restart
+      // no-speech / network: non-fatal, onend will clean up
     };
 
-    recognitionRef.current = rec;
-    try { rec.start(); } catch (_) { /* already started */ }
-  }, [supported]);
-
-  const start = useCallback(() => {
-    if (!supported || listeningRef.current) return;
     listeningRef.current = true;
     setListening(true);
-    startRecognition();
-  }, [supported, startRecognition]);
+    recognitionRef.current = rec;
+    try { rec.start(); } catch (_) {}
+  }, [supported]);
 
   const stop = useCallback(() => {
-    listeningRef.current = false;
+    lastInterimRef.current = "";
+    listeningRef.current   = false;
     setListening(false);
     try { recognitionRef.current?.abort(); } catch (_) {}
   }, []);
