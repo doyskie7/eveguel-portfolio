@@ -50,12 +50,8 @@ function useVoice() {
 }
 
 // ─── Speech-input hook ────────────────────────────────────────────────────────
-// Strategy: acquire the mic stream once via getUserMedia and keep it alive.
-// We create a new SpeechRecognition per utterance but the mic never physically
-// turns off between utterances, so the browser indicator stops flashing.
 function useSpeechInput({ onInterim, onFinal }) {
   const recognitionRef = useRef(null);
-  const streamRef      = useRef(null);   // persistent MediaStream
   const listeningRef   = useRef(false);
   const onInterimRef   = useRef(onInterim);
   const onFinalRef     = useRef(onFinal);
@@ -64,18 +60,6 @@ function useSpeechInput({ onInterim, onFinal }) {
 
   onInterimRef.current = onInterim;
   onFinalRef.current   = onFinal;
-
-  // Keep the mic stream warm so the browser mic indicator stays solid green
-  const acquireStream = useCallback(async () => {
-    if (streamRef.current) return streamRef.current;
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
-      return stream;
-    } catch {
-      return null;
-    }
-  }, []);
 
   const startRecognition = useCallback(() => {
     if (!supported) return;
@@ -95,63 +79,50 @@ function useSpeechInput({ onInterim, onFinal }) {
       if (final) {
         listeningRef.current = false;
         setListening(false);
-        rec.stop();
+        rec.abort();
         onFinalRef.current(final);
       } else if (interim) {
         onInterimRef.current(interim);
       }
     };
 
-    // Browser killed the session (silence/timeout) — restart silently.
-    // Because the getUserMedia stream is still open, the browser mic indicator
-    // stays lit and does NOT flash between sessions.
     rec.onend = () => {
+      // Browser timed out due to silence — restart without toggling UI state
       if (listeningRef.current) {
-        setTimeout(() => {
-          if (listeningRef.current) startRecognition();
-        }, 80);
+        setTimeout(() => { if (listeningRef.current) startRecognition(); }, 100);
       } else {
         setListening(false);
       }
     };
 
     rec.onerror = (e) => {
-      if (!listeningRef.current || e.error === "aborted") {
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
         listeningRef.current = false;
         setListening(false);
       }
-      // no-speech / network errors: onend will restart
+      // no-speech / audio-capture / network: non-fatal, onend handles restart
     };
 
     recognitionRef.current = rec;
-    rec.start();
+    try { rec.start(); } catch (_) { /* already started */ }
   }, [supported]);
 
-  const start = useCallback(async () => {
+  const start = useCallback(() => {
     if (!supported || listeningRef.current) return;
-    await acquireStream();          // open mic once — keeps indicator solid
     listeningRef.current = true;
     setListening(true);
     startRecognition();
-  }, [supported, acquireStream, startRecognition]);
+  }, [supported, startRecognition]);
 
   const stop = useCallback(() => {
     listeningRef.current = false;
     setListening(false);
-    recognitionRef.current?.stop();
-    // Release the stream so the mic indicator clears when user stops
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    streamRef.current = null;
+    try { recognitionRef.current?.abort(); } catch (_) {}
   }, []);
 
   const toggle = useCallback(() => {
     if (listeningRef.current) stop(); else start();
   }, [start, stop]);
-
-  // Clean up stream on unmount
-  useEffect(() => () => {
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-  }, []);
 
   return { toggle, stop, listening, listeningRef, supported };
 }
@@ -357,7 +328,6 @@ export default function AIChatPage({ onClose }) {
 
   const { speak, stop: stopSpeaking, speaking, speakingRef } = useVoice();
 
-  // Use a ref so handleFinal always calls the latest sendMessage (avoids stale closure)
   const sendRef = useRef(null);
 
   const handleInterim = useCallback((t) => setInput(t), []);
@@ -388,7 +358,6 @@ export default function AIChatPage({ onClose }) {
   }, [messages, loading]);
 
   async function sendMessage(text) {
-    sendRef.current = sendMessage;
     const msg = (text ?? input).trim();
     if (!msg || loading) return;
     setInput("");
@@ -416,6 +385,9 @@ export default function AIChatPage({ onClose }) {
     }
     setLoading(false);
   }
+
+  // Keep ref current every render so voice sends always use the latest closure
+  sendRef.current = sendMessage;
 
   function handleMicClick() {
     if (listening) {
